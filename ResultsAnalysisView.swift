@@ -7,9 +7,11 @@ struct ResultsAnalysisView: View {
     @AppStorage("outputRoot") private var outputRoot = ""
     @State private var batches: [AnalysisBatch] = []
     @State private var selectedSessionIDs: Set<String> = []
+    @State private var selectedSection = "answers"
     @State private var startDate = Date()
     @State private var endDate = Date()
     @State private var planFilter = "latest"
+    @State private var historyPlanFilter = "all"
     @State private var tierFilter = "all"
     @State private var modelFilter = "all"
     @State private var taskFilter = "all"
@@ -105,14 +107,32 @@ struct ResultsAnalysisView: View {
         guard let selectedAttemptID else { return nil }
         return filteredAttempts.first { $0.id == selectedAttemptID }
     }
+    private var historyBatches: [AnalysisBatch] {
+        batchesInRange.filter { batch in
+            (tierFilter == "all" || batch.tier == tierFilter) &&
+            (historyPlanFilter == "all" || batch.planSignature == historyPlanFilter)
+        }
+    }
     private var chartPoints: [AnalysisChartPoint] {
-        validBatches.compactMap { batch in
+        historyBatches.filter { $0.valid && $0.complete }.compactMap { batch in
             guard let value = chartValue(batch) else { return nil }
             return AnalysisChartPoint(batch: batch, value: value)
         }.sorted { $0.batch.date < $1.batch.date }
     }
     private var modelOptions: [String] { Array(Set(visibleBatches.map(\.model))).sorted() }
     private var taskOptions: [String] { Array(Set(visibleBatches.flatMap { $0.attempts.map(\.taskID) })).sorted() }
+    private var analysisScopeSummary: String {
+        let runs = Set(batchesInRange.map(\.sessionID)).count
+        let plans = Set(batchesInRange.map(\.planSignature)).count
+        let range: String
+        if let first = batchesInRange.map(\.date).min(), let last = batchesInRange.map(\.date).max() {
+            range = "\(shortDateLabel(first)) – \(shortDateLabel(last))"
+        } else {
+            range = text("No runs in this range", "此范围内没有运行记录")
+        }
+        return text("\(runs) runs · \(batchesInRange.count) batches · \(plans) plans · \(range)",
+                    "\(runs) 次运行 · \(batchesInRange.count) 个批次 · \(plans) 种方案 · \(range)")
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -123,12 +143,28 @@ struct ResultsAnalysisView: View {
                 ContentUnavailableView(text("No test results found", "没有找到测试结果"),
                     systemImage: "chart.bar.xaxis", description: Text(loadMessage.isEmpty ? text("Choose the folder containing your test logs.", "请选择测试日志所在文件夹。") : loadMessage))
             } else {
-                TabView {
-                    overviewTab.tabItem { Label(text("Answers", "结论"), systemImage: "sparkles") }
-                    comparisonTab.tabItem { Label(text("Model comparison", "模型横向比较"), systemImage: "chart.bar.xaxis") }
-                    historyTab.tabItem { Label(text("History", "模型历史趋势"), systemImage: "chart.xyaxis.line") }
-                    detailsTab.tabItem { Label(text("Task details", "任务明细"), systemImage: "list.bullet.rectangle") }
-                }.padding(.horizontal, 14)
+                Text(analysisScopeSummary)
+                    .font(.caption).foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 20).padding(.bottom, 8)
+                Picker(text("Analysis section", "分析页签"), selection: $selectedSection) {
+                    Text(text("Answers", "结论")).tag("answers")
+                    Text(text("Model comparison", "模型横向比较")).tag("comparison")
+                    Text(text("History", "模型历史趋势")).tag("history")
+                    Text(text("Task details", "任务明细")).tag("details")
+                }
+                .pickerStyle(.segmented)
+                .padding(.horizontal, 18).padding(.bottom, 8)
+                Group {
+                    switch selectedSection {
+                    case "comparison": comparisonTab
+                    case "history": historyTab
+                    case "details": detailsTab
+                    default: overviewTab
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .padding(.horizontal, 14)
             }
         }
         .frame(minWidth: 1120, minHeight: 760)
@@ -168,15 +204,15 @@ struct ResultsAnalysisView: View {
                         }
                 }
             } label: {
-                Label(text("Runs: \(selectedSessionIDs.isEmpty ? sessionIDs.count : selectedSessionIDs.count)", "运行记录：\(selectedSessionIDs.isEmpty ? sessionIDs.count : selectedSessionIDs.count)"), systemImage: "calendar")
+                Label(text("Runs: \(selectedSessionIDs.isEmpty ? sessionIDs.count : selectedSessionIDs.count)", "运行记录：\(selectedSessionIDs.isEmpty ? sessionIDs.count : selectedSessionIDs.count)"), systemImage: "line.3.horizontal.decrease.circle")
             }
             Picker(text("Test plan", "测试方案"), selection: $planFilter) {
                 Text(text("Most recent comparable plan", "最近的可比方案")).tag("latest")
                 Text(text("All plans (details only)", "全部方案（仅看明细）")).tag("all")
                 ForEach(planOptions) { option in Text(planLabel(option)).tag(option.signature) }
             }.frame(minWidth: 250, idealWidth: 310)
-            DatePicker(text("From", "开始"), selection: $startDate, displayedComponents: .date).labelsHidden()
-            DatePicker(text("To", "结束"), selection: $endDate, displayedComponents: .date).labelsHidden()
+            DatePicker(text("From", "开始"), selection: $startDate, displayedComponents: .date)
+            DatePicker(text("To", "结束"), selection: $endDate, displayedComponents: .date)
             Picker(text("Tier", "速度模式"), selection: $tierFilter) {
                 Text(text("All", "全部")).tag("all")
                 Text("Standard").tag("default")
@@ -215,7 +251,7 @@ struct ResultsAnalysisView: View {
                 } else {
                     Table(fastInsights) {
                         TableColumn(text("Model", "模型")) { row in Text(displayName(row.model)).fontWeight(.medium) }.width(min: 140, ideal: 170)
-                        TableColumn(text("Pairs", "配对批次")) { row in Text("\(row.pairs.count)") }.width(90)
+                        TableColumn(text("Matched batches", "配对批次数")) { row in Text("\(row.pairs.count)") }.width(115)
                         TableColumn(text("Standard round", "Standard 每轮")) { row in Text(seconds(row.meanStandardSeconds)) }.width(145)
                         TableColumn(text("Fast round", "Fast 每轮")) { row in Text(seconds(row.meanFastSeconds)) }.width(135)
                         TableColumn(text("Time saved", "节省时间")) { row in Text(percent(row.timeSavedPercent)) }.width(120)
@@ -226,7 +262,7 @@ struct ResultsAnalysisView: View {
                             }
                         }.width(220)
                         TableColumn(text("Quota difference", "额度差")) { row in Text(percentagePoints(row.meanQuotaDifference)) }.width(125)
-                    }.frame(minHeight: 170, maxHeight: 270)
+                    }.frame(height: CGFloat(fastInsights.count) * 46 + 40)
                     Text(fastVerdict)
                         .font(.callout).padding(12).frame(maxWidth: .infinity, alignment: .leading)
                         .background(.blue.opacity(0.07), in: RoundedRectangle(cornerRadius: 8))
@@ -242,7 +278,7 @@ struct ResultsAnalysisView: View {
                           "额度快照精度为 1 个百分点。差异小或显示为零都不能证明消耗相同；以实测节省时间为主，额度差只作近似参考。"))
                     .font(.caption).foregroundStyle(.secondary)
             }
-        }.padding(.top, 12)
+        }
     }
 
     private var answerCards: some View {
@@ -269,12 +305,16 @@ struct ResultsAnalysisView: View {
     }
     private var quotaAnswer: String {
         if let lowestQuotaSummary { return "\(displayName(lowestQuotaSummary.model)) · \(tierName(lowestQuotaSummary.tier))" }
-        let distinctModels = Set(summaries.map(\.model))
-        if distinctModels.count < 2 { return text("Need at least two models", "至少需要两个模型") }
-        return text("No clear difference", "暂时分不出高下")
+        return "—"
     }
     private var quotaNote: String {
-        text("Available readings differ by less than 1 pp or are missing.", "可用读数差小于 1 个百分点，或额度数据缺失。")
+        let readings = summaries.compactMap(\.meanFiveHourDelta)
+        guard readings.count > 1, let low = readings.min(), let high = readings.max() else {
+            return text("Need valid 5-hour readings for at least two model/tier groups.", "至少需要两个模型/速度模式组的有效 5 小时读数。")
+        }
+        return high - low < 1
+            ? text("No clear difference at the 1 pp snapshot resolution.", "按 1 个百分点的快照精度，暂时分不出高下。")
+            : text("The available readings do not identify a single lowest-use group.", "现有读数无法确定唯一的最低消耗组。")
     }
     private var apiCostAnswer: String {
         guard let lowestAPISummary else { return text("No priced models", "没有可计价的模型") }
@@ -295,8 +335,8 @@ struct ResultsAnalysisView: View {
         let delta = quota.isEmpty ? nil : quota.reduce(0, +) / Double(quota.count)
         let week = fastInsights.compactMap(\.meanWeeklyDifference)
         let weekDelta = week.isEmpty ? nil : week.reduce(0, +) / Double(week.count)
-        return text("\(fastInsights.reduce(0) { $0 + $1.pairs.count }) matched pairs · 5-hour Δ \(percentagePoints(delta)) · weekly Δ \(percentagePoints(weekDelta)) per batch.",
-                    "\(fastInsights.reduce(0) { $0 + $1.pairs.count }) 组配对 · 5 小时变化 \(percentagePoints(delta)) · 周额度变化 \(percentagePoints(weekDelta))/批。")
+        return text("Across \(fastInsights.reduce(0) { $0 + $1.pairs.count }) matched batches · 5-hour Δ \(percentagePoints(delta)) · weekly Δ \(percentagePoints(weekDelta)) per batch.",
+                    "共 \(fastInsights.reduce(0) { $0 + $1.pairs.count }) 组配对批次 · 5 小时变化 \(percentagePoints(delta)) · 周额度变化 \(percentagePoints(weekDelta))/批。")
     }
     private var fastVerdict: String {
         let gains = fastInsights.compactMap(\.timeSavedPercent)
@@ -329,27 +369,27 @@ struct ResultsAnalysisView: View {
                     .frame(minHeight: 360)
             } else {
             Table(summaries) {
-                TableColumn(text("Model", "模型")) { row in Text(displayName(row.model)).fontWeight(.medium) }.width(min: 125, ideal: 150)
-                TableColumn(text("Tier / effort", "速度模式 / 档位")) { row in Text("\(tierName(row.tier)) · \(effortName(row.effort))") }.width(150)
-                TableColumn(text("Batches / rounds", "批次 / 轮数")) { row in Text("\(row.batches.count) / \(row.roundCount)") }.width(110)
+                TableColumn(text("Model", "模型")) { row in Text(displayName(row.model)).fontWeight(.medium) }.width(125)
+                TableColumn(text("Tier / effort", "速度模式 / 档位")) { row in Text("\(tierName(row.tier)) · \(effortName(row.effort))") }.width(130)
+                TableColumn(text("Batches / rounds", "批次 / 轮数")) { row in Text("\(row.batches.count) / \(row.roundCount)") }.width(100)
                 TableColumn(text("Round / task time", "轮耗时 / 任务耗时")) { row in
                     VStack(alignment: .leading, spacing: 2) { Text(seconds(row.meanRoundSeconds)); Text(seconds(row.meanTaskSeconds)).font(.caption).foregroundStyle(.secondary) }
-                }.width(125)
-                TableColumn(text("First output", "首次输出")) { row in Text(seconds(row.meanFirstVisibleSeconds)) }.width(100)
+                }.width(120)
+                TableColumn(text("First output", "首次输出")) { row in Text(seconds(row.meanFirstVisibleSeconds)) }.width(90)
                 TableColumn(text("Input / cached", "输入 / 缓存")) { row in
                     VStack(alignment: .leading, spacing: 2) { Text(integer(row.inputTokens)); Text(integer(row.cachedTokens)).font(.caption).foregroundStyle(.secondary) }
-                }.width(115)
+                }.width(105)
                 TableColumn(text("Output / reasoning", "输出 / 推理")) { row in
                     VStack(alignment: .leading, spacing: 2) { Text(integer(row.outputTokens)); Text(integer(row.reasoningTokens)).font(.caption).foregroundStyle(.secondary) }
-                }.width(120)
-                TableColumn(text("Output / non-reasoning tok/s", "输出 / 非推理 Token/s")) { row in
+                }.width(110)
+                TableColumn(text("Output / non-reasoning rate", "输出 / 非推理速率")) { row in
                     VStack(alignment: .leading, spacing: 2) { Text(rate(row.outputPerSecond)); Text(rate(row.nonReasoningPerSecond)).font(.caption).foregroundStyle(.secondary) }
-                }.width(155)
-                TableColumn(text("5-hour / weekly Δ", "5 小时 / 周额度变化")) { row in
-                    VStack(alignment: .leading, spacing: 2) { Text(percentagePoints(row.meanFiveHourDelta)); Text(percentagePoints(row.meanWeeklyDelta)).font(.caption).foregroundStyle(.secondary) }
                 }.width(145)
-                TableColumn(text("API equiv. / batch", "API 等价 / 批次")) { row in Text(usd(row.meanAPICost)) }.width(125)
-            }.frame(minHeight: 360)
+                TableColumn(text("Quota Δ · 5h / week", "额度变化 · 5 小时 / 周")) { row in
+                    VStack(alignment: .leading, spacing: 2) { Text(percentagePoints(row.meanFiveHourDelta)); Text(percentagePoints(row.meanWeeklyDelta)).font(.caption).foregroundStyle(.secondary) }
+                }.width(130)
+                TableColumn(text("API equiv. / batch", "API 等价 / 批次")) { row in Text(usd(row.meanAPICost)) }.width(110)
+            }.frame(height: CGFloat(summaries.count) * 44 + 40)
             }
             Text(text("Quota values are percentage-point deltas from rounded snapshots; small differences can be hidden or shifted by the meter's resolution. API-equivalent cost uses the selected model's token counts and the rate snapshot shown below.",
                       "额度变化来自取整后的快照百分点；较小的差异可能被读数精度掩盖或延后。API 等价金额按该模型 Token 统计和下方单价快照计算。"))
@@ -363,6 +403,10 @@ struct ResultsAnalysisView: View {
             HStack {
                 Text(text("Follow each model across runs", "按模型查看多次运行的变化")).font(.headline)
                 Spacer()
+                Picker(text("History workload", "历史方案范围"), selection: $historyPlanFilter) {
+                    Text(text("All plans · points only", "全部方案 · 仅显示点")).tag("all")
+                    ForEach(planOptions) { option in Text(compactPlanLabel(option)).tag(option.signature) }
+                }.frame(minWidth: 220, idealWidth: 280)
                 Picker(text("Metric", "指标"), selection: $chartMetric) {
                     Text(text("Mean round time", "平均轮耗时")).tag("roundTime")
                     Text(text("Output tokens/s", "输出 Token/s")).tag("throughput")
@@ -372,24 +416,27 @@ struct ResultsAnalysisView: View {
                 }.frame(width: 240)
             }
             Chart(chartPoints) { point in
-                let series = "\(displayName(point.batch.model)) · \(tierName(point.batch.tier))"
-                LineMark(x: .value(text("Run date", "运行日期"), point.batch.date),
-                         y: .value(chartMetricTitle, point.value),
-                         series: .value(text("Model and tier", "模型与速度模式"), series))
-                    .interpolationMethod(.catmullRom)
+                let series = chartSeriesLabel(point.batch)
+                if historyPlanFilter != "all" {
+                    LineMark(x: .value(text("Run date", "运行日期"), point.batch.date),
+                             y: .value(chartMetricTitle, point.value),
+                             series: .value(text("Model and tier", "模型与速度模式"), series))
+                        .interpolationMethod(.catmullRom)
+                }
                 PointMark(x: .value(text("Run date", "运行日期"), point.batch.date),
                           y: .value(chartMetricTitle, point.value))
                     .foregroundStyle(by: .value(text("Model and tier", "模型与速度模式"), series))
             }
-            .chartLegend(position: .bottom, alignment: .leading)
+            .chartLegend(position: .trailing, alignment: .center)
             .chartXAxisLabel(text("Run date", "运行日期"))
             .chartYAxisLabel(chartMetric == "apiCost" ? "USD" : chartMetric == "quota" ? "percentage points" : chartMetric == "roundTime" ? "seconds" : "tokens / second")
             .frame(minHeight: 390)
             if chartPoints.isEmpty {
                 ContentUnavailableView(text("No valid batches in this range", "此范围内没有有效批次"), systemImage: "chart.xyaxis.line")
             }
-            Text(text("Each point is one complete model/service-tier batch. A line connects batches with the same model and tier; it does not imply continuous measurements between runs.",
-                      "每个点代表一个完整的模型/速度模式批次。折线连接相同模型和速度模式的批次，不表示两次运行之间有连续测量。"))
+            Text(historyPlanFilter == "all"
+                ? text("Each point is one complete batch. All plans are included without connecting different workloads.", "每个点代表一个完整批次。当前包含全部方案，不会连线比较不同工作负载。")
+                : text("Each point is one complete batch. Lines connect runs with the selected matching workload; they do not imply continuous measurements between runs.", "每个点代表一个完整批次。折线连接所选方案下的多次运行，不表示两次运行之间有连续测量。"))
                 .font(.caption).foregroundStyle(.secondary)
         }.padding(.top, 12)
     }
@@ -410,8 +457,8 @@ struct ResultsAnalysisView: View {
                 TextField(text("Search model, task, run…", "搜索模型、任务、运行记录…"), text: $searchText)
                     .textFieldStyle(.roundedBorder).frame(width: 250)
             }
-            Text(text("\(filteredAttempts.count) attempts · select a row to inspect token composition, timing, quota batch, and the saved response.",
-                      "\(filteredAttempts.count) 次尝试 · 选择一行查看 Token 构成、耗时、额度批次和保存的回答。"))
+                Text(text("\(filteredAttempts.count) attempts across \(Set(filteredAttempts.map(\.sessionID)).count) runs · select a row for details.",
+                      "\(filteredAttempts.count) 次尝试，分布在 \(Set(filteredAttempts.map(\.sessionID)).count) 次运行中 · 选择一行查看详情。"))
                 .font(.caption).foregroundStyle(.secondary)
             Table(filteredAttempts, selection: $selectedAttemptID) {
                 TableColumn(text("Run", "运行")) { attempt in Text(dateLabel(attempt.startedAt ?? attempt.batchDate)).lineLimit(1) }.width(135)
@@ -442,7 +489,7 @@ struct ResultsAnalysisView: View {
                     Text(rate(value))
                 }.width(100)
                 TableColumn(text("API equiv.", "API 等价金额")) { attempt in Text(usd(apiCost(attempt))) }.width(110)
-            }.frame(minHeight: 300, maxHeight: 430)
+            }.frame(height: min(430, max(90, CGFloat(filteredAttempts.count) * 46 + 40)))
             if let attempt = selectedAttempt {
                 attemptDetail(attempt)
             }
@@ -463,7 +510,8 @@ struct ResultsAnalysisView: View {
         VStack(alignment: .leading, spacing: 4) {
             Text(title).font(.caption).foregroundStyle(.secondary)
             Text(value).font(.system(size: 19, weight: .semibold, design: .rounded)).lineLimit(1).minimumScaleFactor(0.75)
-            Text(note).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+            Text(note).font(.caption2).foregroundStyle(.secondary).lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
         }.frame(maxWidth: .infinity, alignment: .leading).padding(11)
             .background(.quaternary.opacity(0.45), in: RoundedRectangle(cornerRadius: 9))
     }
@@ -653,6 +701,11 @@ struct ResultsAnalysisView: View {
          "gpt-6-luna": "GPT-6 Luna", "gpt-5.6-luna": "GPT-5.6 Luna"][model] ?? model
     }
     private func tierName(_ tier: String) -> String { tier == "fast" ? "Fast" : "Standard" }
+    private func chartSeriesLabel(_ batch: AnalysisBatch) -> String {
+        let model = ["gpt-6.1-sol": "6.1 Sol", "gpt-6-sol": "6 Sol", "gpt-5.6-sol": "5.6 Sol",
+                     "gpt-6-luna": "6 Luna", "gpt-5.6-luna": "5.6 Luna"][batch.model] ?? batch.model
+        return "\(model) · \(tierName(batch.tier))"
+    }
     private func effortName(_ effort: String) -> String {
         ["low": "Light", "medium": "Medium", "high": "High", "sol_low_luna_medium": text("Model-specific", "按模型")][effort] ?? effort
     }
@@ -671,11 +724,21 @@ struct ResultsAnalysisView: View {
         return text("\(tasks) · \(option.rounds) rounds · max \(option.concurrency) parallel · \(effort) · \(option.suiteTag)",
                     "\(tasks) · \(option.rounds) 轮 · 并发 \(option.concurrency) · \(effort) · \(option.suiteTag)")
     }
+    private func compactPlanLabel(_ option: AnalysisPlanOption) -> String {
+        "\(option.tasks.joined(separator: "+")) · \(option.rounds)r / \(option.concurrency)x · \(effortName(option.effort)) · \(option.suiteTag)"
+    }
     private func dateLabel(_ date: Date) -> String {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: isChinese ? "zh_CN" : "en_US")
         formatter.timeZone = TimeZone(identifier: "Asia/Shanghai")
         formatter.dateFormat = isChinese ? "yyyy-MM-dd HH:mm" : "MMM d, yyyy HH:mm"
+        return formatter.string(from: date)
+    }
+    private func shortDateLabel(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: isChinese ? "zh_CN" : "en_US")
+        formatter.timeZone = TimeZone(identifier: "Asia/Shanghai")
+        formatter.dateFormat = isChinese ? "M月d日" : "MMM d"
         return formatter.string(from: date)
     }
     private func seconds(_ value: Double?) -> String { value.map { String(format: "%.1f s", $0) } ?? "—" }

@@ -41,7 +41,9 @@ struct ContentView: View {
     @State private var operation = ""
     @State private var phase = "idle"
     @State private var message = "Check the environment, then start the test manually."
+    @State private var localNoticeCode = ""
     @State private var environment: [String: Any] = [:]
+    @State private var environmentCheckedForRun = false
     @State private var proxyMode = "auto"
     @State private var proxyURL = "http://127.0.0.1:7897"
     @State private var networkInfo: [String: Any] = [:]
@@ -71,8 +73,39 @@ struct ContentView: View {
         return FileManager.default.fileExists(atPath: folder.appendingPathComponent("session.json").path)
     }
     var canStart: Bool {
-        !isRunning && !environment.isEmpty && !selectedModels.isEmpty && !selectedTasks.isEmpty && isolationConfirmed &&
+        !isRunning && environmentCheckedForRun && !selectedModels.isEmpty && !selectedTasks.isEmpty && isolationConfirmed &&
             (serviceTier != "mixed" || repeats.isMultiple(of: 2))
+    }
+    var startDisabledReason: String? {
+        if isRunning { return text("A test is already running.", "测试正在运行。") }
+        if !environmentCheckedForRun { return text("Check the environment before starting.", "开始前请先检查环境。") }
+        if selectedModels.isEmpty { return text("Select at least one model.", "至少选择一个模型。") }
+        if selectedTasks.isEmpty { return text("Select at least one task.", "至少选择一项任务。") }
+        if !isolationConfirmed { return text("Confirm that other Codex / Work tasks are paused.", "请确认已暂停同账户的其他 Codex / Work 任务。") }
+        if serviceTier == "mixed" && !repeats.isMultiple(of: 2) {
+            return text("Use an even repeat count to compare both service tiers.", "对比两种速度模式时，重复次数需为偶数。")
+        }
+        return nil
+    }
+    var displayedStatusMessage: String {
+        switch localNoticeCode {
+        case "proxyChanged": return text("Proxy settings changed. Check the environment again before starting.", "代理设置已变化，请重新检查环境后再开始。")
+        case "pauseRequested": return text("Will pause after saving the current round.", "会在当前轮全部保存后暂停。")
+        case "stopRequested": return text("Stop requested for all in-flight tasks.", "已请求停止所有在途任务。")
+        default: break
+        }
+        switch phase {
+        case "completed": return text("Test complete. Export the data logs for analysis.", "测试完成。请导出数据日志，交给分析者形成结论。")
+        case "ready": return text("Environment check complete. No model was called.", "环境检查完成；尚未调用模型。")
+        case "running": return text("The test is running. Progress and the current model are shown below.", "测试进行中；进度和当前模型见下方。")
+        case "settling": return operation == "probe"
+            ? text("Checking the CLI environment and quota readings.", "正在检查 CLI 环境和额度读数。")
+            : text("Checking quota readings before continuing.", "正在核对额度读数。")
+        case "retrying": return text("A quota read failed. Retrying without restarting the task.", "额度读取暂时失败；正在重试，不会重启任务。")
+        case "paused": return text("The test is paused. See the saved logs for details.", "测试已暂停；详情请查看保存的日志。")
+        case "error": return text("Environment check failed. See the saved diagnostics for details.", "环境检查失败；详情请查看保存的检测日志。")
+        default: return text("Check the environment, then start the test manually.", "检查环境后，再手动开始测试。")
+        }
     }
     var canResume: Bool {
         !isRunning && hasSession && sessionCanResume
@@ -103,8 +136,8 @@ struct ContentView: View {
                 Picker(text("Language", "语言"), selection: $appLanguage) {
                     Text("English").tag("en")
                     Text("简体中文").tag("zh-Hans")
-                }.frame(width: 130)
-                Text("v\(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "—") · \(text("Custom test plan", "可定制测试方案"))")
+                }.frame(width: 160)
+                Text("v\(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "—")")
                     .font(.system(.callout, design: .monospaced)).padding(.horizontal, 12).padding(.vertical, 7)
                     .background(.blue.opacity(0.09), in: Capsule())
             }.padding(24)
@@ -122,12 +155,9 @@ struct ContentView: View {
                                             UserDefaults.standard.set(Array(selectedModels), forKey: "planModels")
                                         }))
                                 }
-                                Text(text("Select the models to include. Availability and supported effort settings are checked before a run.", "选择要纳入测试的模型。开始前会检查模型可用性和支持的推理档位。"))
-                                    .font(.caption).foregroundStyle(.secondary)
-                                Text(text("The model-specific effort option uses Light for Sol and Medium for Luna. Effort is recorded for each attempt.", "按模型使用档位时，Sol 为 Light、Luna 为 Medium；每次尝试的档位都会写入日志。"))
-                                    .font(.caption).foregroundStyle(.secondary)
                             }.frame(maxWidth: .infinity, alignment: .leading).padding(9)
                         }
+                        .help(text("Model availability and supported effort settings are checked before a run.", "开始前会检查模型可用性和支持的推理档位。"))
                         GroupBox(text("Shared test tasks", "相同测试材料")) {
                             VStack(alignment: .leading, spacing: 11) {
                                 ForEach(taskNames, id: \.0) { task in
@@ -141,8 +171,6 @@ struct ContentView: View {
                                 Divider()
                                 Text(text("\(total) tasks total; each starts in a fresh session.", "共 \(total) 个任务，每个任务均从全新会话开始。"))
                                     .font(.caption).foregroundStyle(.secondary)
-                                Text(text("Finish \(selectedTasks.count * repeats) tasks for each model before switching.", "每个模型连续完成 \(selectedTasks.count * repeats) 项后再切换。"))
-                                    .font(.caption).foregroundStyle(.secondary)
                             }.padding(9)
                         }
                         GroupBox(text("Execution options", "执行选项")) {
@@ -153,26 +181,25 @@ struct ContentView: View {
                                     Text(text("Compare Standard and Fast", "对比 Standard 与 Fast")).tag("mixed")
                                 }
                                 Picker(text("Reasoning effort", "推理档位"), selection: $reasoningEffort) {
-                                    Text(text("Model-specific (Sol Light, Luna Medium)", "按模型使用档位（Sol Light、Luna Medium）")).tag("sol_low_luna_medium")
+                                    Text(text("Model-specific", "按模型设置")).tag("sol_low_luna_medium")
                                     Text("Low").tag("low")
                                     Text("Medium").tag("medium")
                                     Text("High").tag("high")
-                                }
+                                }.help(text("Uses Light for Sol and Medium for Luna. The selected effort is recorded with each attempt.", "Sol 使用 Light、Luna 使用 Medium；每次尝试都会记录实际档位。"))
                                 Stepper(text("Repeat each task \(repeats) times", "每项重复 \(repeats) 次"), value: $repeats,
                                         in: serviceTier == "mixed" ? 2...20 : 1...20,
                                         step: serviceTier == "mixed" ? 2 : 1)
                                 if serviceTier == "mixed" {
-                                    Text(text("Comparison mode splits rounds evenly between Standard and Fast, so the repeat count must be even.", "对比模式会将轮数平均分给 Standard 和 Fast，因此重复次数必须为偶数。"))
+                                    Text(text("Use an even repeat count to balance both tiers.", "重复次数需为偶数，才能平均分配两种速度模式。"))
                                         .font(.caption).foregroundStyle(.secondary)
                                 }
                                 Stepper(text("Parallel tasks per round: \(concurrency)", "每轮并行任务：\(concurrency)"), value: $concurrency, in: 1...max(selectedTasks.count, 1))
-                                Text(text("Each round waits for all selected tasks before the next round starts.", "每轮会等待选中的任务全部完成，再开始下一轮。"))
-                                    .font(.caption).foregroundStyle(.secondary)
+                                    .help(text("Each round waits for all selected tasks before the next round starts.", "每轮会等待选中的任务全部完成，再开始下一轮。"))
                             }.padding(9)
                         }
                         GroupBox(text("Log location", "日志位置")) {
                             VStack(alignment: .leading, spacing: 8) {
-                                Text(outputRoot.isEmpty ? "正在载入…" : outputRoot)
+                                Text(outputRoot.isEmpty ? text("Loading…", "正在载入…") : outputRoot)
                                     .font(.caption).textSelection(.enabled).lineLimit(3)
                                 Button(text("Change…", "更改位置…"), action: chooseOutputFolder)
                             }.frame(maxWidth: .infinity, alignment: .leading).padding(8)
@@ -188,23 +215,15 @@ struct ContentView: View {
                                 if proxyMode == "manual" {
                                     TextField("http://127.0.0.1:7897", text: $proxyURL)
                                         .textFieldStyle(.roundedBorder)
-                                    Text(text("HTTP/HTTPS/SOCKS5 URLs are supported; usernames and passwords are not.", "支持HTTP/HTTPS/SOCKS5地址；不支持用户名或密码。"))
-                                        .font(.caption).foregroundStyle(.secondary)
+                                        .help(text("HTTP/HTTPS/SOCKS5 URLs are supported. Authentication is not.", "支持 HTTP/HTTPS/SOCKS5 地址；不支持代理认证。"))
                                 }
-                                Text(text("Auto mode prefers the system's static proxy, then inherits the app environment. For PAC, enter a manual proxy.", "自动模式：系统静态代理优先；未设置时继承应用环境。PAC请改用手动地址。"))
-                                    .font(.caption).foregroundStyle(.secondary)
-                                Text(text("These settings affect only the CLI launched by this app. Direct mode does not disable VPN or TUN.", "设置只影响本应用启动的CLI；直连不会关闭VPN或TUN。"))
-                                    .font(.caption).foregroundStyle(.secondary)
                                 Button(text("View environment logs", "查看环境检测日志")) {
                                     let folder = URL(fileURLWithPath: outputRoot).appendingPathComponent("_环境检查")
                                     NSWorkspace.shared.activateFileViewerSelecting([folder])
                                 }
                             }.padding(8)
                         }
-                        Toggle(text("I will pause other Codex / Work tasks on this account during the test.", "测试期间，我会暂停同账户其他 Codex / Work 任务。"), isOn: $isolationConfirmed)
-                            .fixedSize(horizontal: false, vertical: true)
-                        Text(text("Progress is saved locally. Do not run another model chat or automated task during the test.", "进度由应用本地记录。测试过程中请不要让另一个模型聊天或自动任务继续运行。"))
-                            .font(.caption).foregroundStyle(.secondary)
+                        .help(text("Proxy choices affect only the CLI launched by this app. Direct mode does not disable VPN or TUN. Automatic mode uses the static system proxy when available; choose Manual for PAC.", "代理设置只影响本应用启动的 CLI，不会关闭 VPN 或 TUN。自动模式优先使用系统静态代理；PAC 请选手动地址。"))
                     }.disabled(isRunning).padding(.bottom, 10)
                 }.frame(width: 340)
                 VStack(alignment: .leading, spacing: 16) {
@@ -217,7 +236,7 @@ struct ContentView: View {
                                 Spacer()
                                 if isRunning { ProgressView().controlSize(.small) }
                             }
-                            Text(message).fixedSize(horizontal: false, vertical: true)
+                            Text(displayedStatusMessage).fixedSize(horizontal: false, vertical: true)
                             if hasSession || operation == "run" {
                                 ProgressView(value: Double(completed), total: Double(max(planned, 1)))
                                 HStack {
@@ -227,7 +246,7 @@ struct ContentView: View {
                                 }.font(.caption).foregroundStyle(.secondary)
                             }
                             if !currentModel.isEmpty {
-                                Text(text("\(displayName(currentModel)) · Round \(currentRepeat) · \(currentTask)", "\(displayName(currentModel)) · 第 \(currentRepeat) 轮 · \(currentTask)"))
+                                Text(text("\(displayName(currentModel)) · Round \(currentRepeat) · \(currentTaskLabel)", "\(displayName(currentModel)) · 第 \(currentRepeat) 轮 · \(currentTaskLabel)"))
                                     .font(.callout).foregroundStyle(.secondary)
                             }
                         }.frame(maxWidth: .infinity, alignment: .leading).padding(10)
@@ -245,6 +264,10 @@ struct ContentView: View {
                                 Spacer()
                                 Text(environment["login"] as? String ?? text("Not checked", "尚未检查")).foregroundStyle(.secondary)
                             }
+                            if let checkedAt = (environment["checked_at"] as? String).flatMap(parseISODate) {
+                                Text(text("Environment checked \(formatDate(checkedAt))", "环境检查于 \(formatDate(checkedAt))"))
+                                    .font(.caption2).foregroundStyle(.secondary)
+                            }
                             Divider()
                             HStack(spacing: 20) {
                                 quotaView(text("5-hour quota", "5 小时剩余"), window: "primary")
@@ -252,18 +275,30 @@ struct ContentView: View {
                             }
                             if let pool = mainPool(), let credits = pool["credits"] as? [String: Any],
                                let value = credits["balance"] as? String {
-                                Text(text("Credit balance: \(value)", "积分余额：\(value)")).font(.caption).foregroundStyle(.secondary)
+                                Text(text("Credit balance: \(formatCreditBalance(value))", "积分余额：\(formatCreditBalance(value))"))
+                                    .font(.caption).foregroundStyle(.secondary)
+                            }
+                            if let observedAt = limitsObservedAt {
+                                HStack(spacing: 4) {
+                                    Text(text("Quota as of \(formatDate(observedAt))", "额度截至 \(formatDate(observedAt))"))
+                                    if Date().timeIntervalSince(observedAt) > 15 * 60 {
+                                        Text(text("· last check, may be outdated", "· 上次检查，可能已过期"))
+                                            .foregroundStyle(.orange)
+                                    }
+                                }.font(.caption2).foregroundStyle(.secondary)
                             }
                             Text(text("Pauses near quota limits; reset cards are never used automatically. Samples with a changed credit balance are invalidated.", "接近额度边界时暂停；不自动使用重置卡。积分余额变化的样本会作废。"))
                                 .font(.caption).foregroundStyle(.secondary)
                             if let lines = networkInfo["messages"] as? [String], !lines.isEmpty {
-                                Divider()
-                                Text(text("Proxy and connection checks", "代理与连接检测")).font(.caption.bold())
-                                ScrollView {
-                                    Text(lines.joined(separator: "\n"))
-                                        .font(.system(size: 11)).textSelection(.enabled)
-                                        .frame(maxWidth: .infinity, alignment: .leading)
-                                }.frame(maxHeight: 125)
+                                DisclosureGroup(text("Proxy and connection details", "代理与连接详情")) {
+                                    ScrollView {
+                                        VStack(alignment: .leading, spacing: 4) {
+                                            ForEach(Array(localizedNetworkMessages(lines).enumerated()), id: \.offset) { _, line in
+                                                Text(line).font(.system(size: 11)).textSelection(.enabled)
+                                            }
+                                        }.frame(maxWidth: .infinity, alignment: .leading)
+                                    }.frame(maxHeight: 125)
+                                }
                             }
                         }.padding(10)
                     }
@@ -295,7 +330,12 @@ struct ContentView: View {
             HStack(spacing: 10) {
                 Button(text("Analyze results", "分析结果")) { openWindow(id: "analysis") }
                 Button(text("Check environment", "检查环境"), action: checkEnvironment).disabled(isRunning)
-                Button(text("Start new test", "开始新测试"), action: beginRun).buttonStyle(.borderedProminent).disabled(!canStart)
+                Toggle(text("I’ll pause other tasks", "我会暂停其他任务"), isOn: $isolationConfirmed)
+                    .toggleStyle(.checkbox)
+                    .disabled(isRunning)
+                    .help(text("Pause other model chats and automated tasks on this account for the duration of the test. Progress is saved locally.", "测试期间请暂停同账户的其他模型聊天和自动任务。进度会保存在本机。"))
+                Button(text("Start new test", "开始新测试"), action: beginRun).buttonStyle(.borderedProminent)
+                    .disabled(!canStart).help(startDisabledReason ?? "")
                 if canResume {
                     Button(text("Retry unfinished batches", "重测未完成批次")) { showRestartConfirmation = true }.disabled(!isolationConfirmed)
                 }
@@ -307,6 +347,9 @@ struct ContentView: View {
                 Button(text("Show log folder", "查看日志文件夹"), action: revealFolder).disabled(!hasSession)
                 Button(text("Export data logs…", "导出数据日志…"), action: exportLogs).disabled(isRunning || !hasSession || exportBusy)
             }.padding(18)
+            if let reason = startDisabledReason {
+                Text(reason).font(.caption).foregroundStyle(.secondary).padding(.horizontal, 18).padding(.bottom, 10)
+            }
         }
         .frame(minWidth: 1040, minHeight: 760)
         .onAppear(perform: loadDefaults)
@@ -314,6 +357,12 @@ struct ContentView: View {
         .onChange(of: proxyURL) { invalidateEnvironment() }
         .onChange(of: serviceTier) { if serviceTier == "mixed" && !repeats.isMultiple(of: 2) { repeats = min(repeats + 1, 20) } }
         .onChange(of: selectedTasks.count) { concurrency = min(concurrency, max(selectedTasks.count, 1)) }
+        .onChange(of: appLanguage) {
+            logLines = []
+            lastLogMessage = ""
+            lastStatusTimestamp = ""
+            loadStatus()
+        }
         .onReceive(isRunning ? timer.eraseToAnyPublisher() : Empty<Date, Never>().eraseToAnyPublisher()) { _ in
             loadStatus()
         }
@@ -347,6 +396,73 @@ struct ContentView: View {
     func mainPool() -> [String: Any]? {
         let snapshot = !latestLimits.isEmpty ? latestLimits : environment["limits"] as? [String: Any] ?? [:]
         return (snapshot["pools"] as? [String: Any])?["codex"] as? [String: Any]
+    }
+    var limitsObservedAt: Date? {
+        guard let value = (latestLimits.isEmpty ? environment["limits"] as? [String: Any] : latestLimits)?["observed_at"] as? String else { return nil }
+        return parseISODate(value)
+    }
+    var currentTaskLabel: String {
+        if currentTask.hasPrefix("本轮"), currentTask.hasSuffix("项并行"),
+           let count = Int(currentTask.dropFirst(2).dropLast(3)) {
+            return text("\(count) tasks in parallel", "\(count) 项并行")
+        }
+        return isChinese ? currentTask : text("Current work in progress", "当前任务进行中")
+    }
+    func formatCreditBalance(_ value: String) -> String {
+        guard let amount = Double(value) else { return value }
+        let formatter = NumberFormatter()
+        formatter.numberStyle = .decimal
+        formatter.maximumFractionDigits = 1
+        formatter.minimumFractionDigits = 0
+        formatter.locale = Locale(identifier: isChinese ? "zh_CN" : "en_US")
+        return formatter.string(from: NSNumber(value: amount)) ?? value
+    }
+    func parseISODate(_ value: String) -> Date? {
+        let fractional = ISO8601DateFormatter()
+        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return fractional.date(from: value) ?? ISO8601DateFormatter().date(from: value)
+    }
+    func localizedNetworkMessages(_ lines: [String]) -> [String] {
+        guard !isChinese else { return lines }
+        return lines.map { line in
+            if line.hasPrefix("代理来源：") {
+                let source = String(line.dropFirst("代理来源：".count))
+                let translated = ["系统代理": "system proxy", "手动设置": "manual proxy", "明确直连": "direct connection",
+                                  "应用启动环境": "app launch environment", "系统未设置代理；回退到应用启动环境": "system proxy unavailable; using app launch environment"][source] ?? source
+                return "Proxy source: \(translated)"
+            }
+            if line.hasPrefix("注入CLI：") {
+                let details = String(line.dropFirst("注入CLI：".count))
+                    .replacingOccurrences(of: "；无代理变量（直连）", with: "; no proxy variables (direct)")
+                return "Injected into CLI: \(details)"
+            }
+            if line.hasPrefix("代理端口 ") {
+                return line.replacingOccurrences(of: "代理端口 ", with: "Proxy port ")
+                    .replacingOccurrences(of: "：可达", with: ": reachable")
+                    .replacingOccurrences(of: "：不可达", with: ": unreachable")
+            }
+            if line.hasPrefix("HTTPS探测配置：") { return line.replacingOccurrences(of: "HTTPS探测配置：", with: "HTTPS probe configuration: ") }
+            if line.contains("排除简单主机名") { return "The system's simple-hostname exclusion was not translated; OpenAI's full domain names are unaffected." }
+            if line.contains("握手探测未完成") { return "The handshake probe did not complete; HTTPS/WebSocket connectivity is unconfirmed." }
+            if line.contains("握手探测收到HTTP") {
+                return line.replacingOccurrences(of: "握手探测收到HTTP ", with: "Handshake probe returned HTTP ")
+                    .replacingOccurrences(of: "；不代表正式WebSocket可用（本探测不发送登录凭据）。", with: "; this does not verify production WebSocket connectivity (no login credentials were sent).")
+            }
+            if line.hasPrefix("HTTP代理CONNECT隧道：") {
+                return line.replacingOccurrences(of: "HTTP代理CONNECT隧道：", with: "HTTP proxy CONNECT tunnel: ")
+            }
+            if line.contains("未建立CONNECT隧道") { return "The HTTP proxy did not establish a CONNECT tunnel; it may have been bypassed by NO_PROXY." }
+            if line.contains("匿名WebSocket升级成功") { return "An unauthenticated WebSocket upgrade succeeded; the production login session still needs a real task to confirm it." }
+            if line.contains("握手探测未收到HTTP响应") {
+                return line.replacingOccurrences(of: "握手探测未收到HTTP响应（curl退出码", with: "Handshake probe received no HTTP response (curl exit code ")
+                    .replacingOccurrences(of: "）。", with: ").")
+            }
+            if line.contains("curl探测只验证") { return "The curl probe checks only its own route; the CLI route and production WebSocket compatibility remain unverified." }
+            if line.contains("代理端口不可达") { return "The proxy port is unreachable; Codex was not started." }
+            if line.contains("CLI账户额度读取成功") { return "The CLI quota read succeeded without a model call; this does not verify model WebSocket connectivity." }
+            if line.contains("未调用模型") { return "No model was called." }
+            return "Additional diagnostic details are available in the saved environment log."
+        }
     }
     @ViewBuilder func quotaView(_ title: String, window: String) -> some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -385,7 +501,24 @@ struct ContentView: View {
             loadStatus()
             if canResume { restorePlan(restoreProxy: false) }
         }
+        loadSavedEnvironment()
         NSApplication.shared.activate(ignoringOtherApps: true)
+    }
+    func loadSavedEnvironment() {
+        let file = URL(fileURLWithPath: outputRoot).appendingPathComponent("_环境检查/environment.json")
+        guard let bytes = try? Data(contentsOf: file),
+              let saved = try? JSONSerialization.jsonObject(with: bytes) as? [String: Any] else { return }
+        environment = saved
+        if let network = saved["network"] as? [String: Any] { networkInfo = network }
+        if let limits = saved["limits"] as? [String: Any] {
+            let savedDate = (limits["observed_at"] as? String).flatMap(parseISODate)
+            let currentDate = (latestLimits["observed_at"] as? String).flatMap(parseISODate)
+            if currentDate == nil {
+                latestLimits = limits
+            } else if let savedDate, let currentDate, savedDate > currentDate {
+                latestLimits = limits
+            }
+        }
     }
     func chooseOutputFolder() {
         let panel = NSOpenPanel()
@@ -406,7 +539,8 @@ struct ContentView: View {
     }
     func checkEnvironment() {
         guard !isRunning, validateProxyURL() else { return }
-        environment = [:]; networkInfo = [:]
+        environmentCheckedForRun = false
+        networkInfo = [:]
         UserDefaults.standard.set(proxyMode, forKey: "proxyMode")
         if proxyMode == "manual" { UserDefaults.standard.set(proxyURL, forKey: "proxyURL") }
         let folder = URL(fileURLWithPath: outputRoot).appendingPathComponent("_环境检查", isDirectory: true)
@@ -456,9 +590,10 @@ struct ContentView: View {
         planned = total
     }
     func invalidateEnvironment() {
-        environment = [:]; networkInfo = [:]; latestLimits = [:]
+        environmentCheckedForRun = false
         if !isRunning {
             phase = "idle"
+            localNoticeCode = "proxyChanged"
             message = text("Proxy settings changed. Check the environment again. Retrying an old batch uses its original settings.", "代理设置已变化，请重新检查环境。重测旧批次会使用原计划的设置。")
         }
     }
@@ -513,6 +648,7 @@ struct ContentView: View {
             statusFolder = folder
             if command == "run" { currentFolder = folder }
             operation = command
+            localNoticeCode = ""
             phase = "settling"
             message = command == "probe" ? text("Reading environment; no model will be called.", "正在读取环境；不会调用模型。") : text("Establishing the quota baseline for an isolated test.", "正在建立独立测试的额度基线。")
             let oldBytes = try? Data(contentsOf: folder.appendingPathComponent("status.json"))
@@ -536,6 +672,7 @@ struct ContentView: View {
         guard timestamp != lastStatusTimestamp else { return }
         lastStatusTimestamp = timestamp
         phase = value["phase"] as? String ?? phase
+        if phase != "running" { localNoticeCode = "" }
         message = value["message"] as? String ?? message
         completed = value["completed"] as? Int ?? completed
         planned = value["total"] as? Int ?? planned
@@ -547,10 +684,11 @@ struct ContentView: View {
         if let env = value["environment"] as? [String: Any] {
             environment = env
             latestLimits = env["limits"] as? [String: Any] ?? [:]
+            if operation == "probe" && phase == "ready" { environmentCheckedForRun = true }
         }
         if let limits = value["limits"] as? [String: Any] { latestLimits = limits }
         let formatter = DateFormatter(); formatter.dateFormat = "HH:mm:ss"
-        let line = "\(formatter.string(from: Date()))  \(message)"
+        let line = "\(formatter.string(from: Date()))  \(displayedStatusMessage)"
         let identity = "\(phase)|\(message)"
         if lastLogMessage != identity { logLines.append(line); lastLogMessage = identity }
         if logLines.count > 120 { logLines.removeFirst(logLines.count - 120) }
@@ -630,6 +768,7 @@ struct ContentView: View {
         do {
             let data = try JSONSerialization.data(withJSONObject: ["action": action])
             try data.write(to: folder.appendingPathComponent("control.json"), options: .atomic)
+            localNoticeCode = action == "pause" ? "pauseRequested" : "stopRequested"
             message = action == "pause" ? text("Will pause after saving the current round. Incomplete service tier batches must be rerun.", "会在当前轮全部保存后暂停；未完成的速度模式批次需要重跑。") : text("Stop requested for all in-flight tasks. The current service tier batch will be invalidated.", "已请求停止所有在途任务；当前速度模式批次会作废。")
         } catch { present(error.localizedDescription) }
     }
