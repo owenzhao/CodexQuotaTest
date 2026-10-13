@@ -17,7 +17,7 @@ mac.mkdir(parents=True,exist_ok=True)
 resources.mkdir(parents=True,exist_ok=True)
 for name in ['runner.py','suite.json','defaults.json','AppIcon-v3.icns']:
     shutil.copy2(source/name,resources/name)
-info={'CFBundleName':'Codex 额度测试','CFBundleDisplayName':f'Codex 额度测试 {version}',
+info={'CFBundleName':'Codex Quota Test','CFBundleDisplayName':f'Codex Quota Test {version}',
     'CFBundleIdentifier':'com.parussoft.CodexQuotaTest','CFBundleExecutable':'CodexQuotaTest',
     'CFBundlePackageType':'APPL','CFBundleShortVersionString':version,'CFBundleVersion':'21',
     'CFBundleIconFile':'AppIcon-v3.icns',

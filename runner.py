@@ -667,10 +667,13 @@ def validate_config(config):
         raise RuntimeError('任务选择无效。')
     if not isinstance(config.get('repeats'), int) or not 1<=config['repeats']<=20:
         raise RuntimeError('重复次数必须为 1～20。')
-    if config.get('effort') not in ['high','sol_low_luna_medium'] or config.get('service_tier') not in ['default','mixed']:
+    if config.get('effort') not in ['low','medium','high','sol_low_luna_medium'] or config.get('service_tier') not in ['default','fast','mixed']:
         raise RuntimeError('思考档位或速度模式无效。')
     if config['service_tier']=='mixed' and config['repeats']%2:
         raise RuntimeError('Standard/Fast 对比需要偶数轮，两种模式各占一半。')
+    concurrency=config.get('concurrency',len(tasks))
+    if not isinstance(concurrency,int) or not 1<=concurrency<=len(tasks):
+        raise RuntimeError('每轮并行任务数必须在所选任务数范围内。')
     if config.get('isolation_confirmed') is not True:
         raise RuntimeError('请先确认测试期间不使用同账户的其他 Codex/Work 任务。')
     if config.get('measurement_strategy') != 'complete_model_batch':
@@ -683,15 +686,18 @@ def run(config_file, resume):
     config=json.loads(Path(config_file).read_text())
     validate_config(config)
     (DATA/'control.json').unlink(missing_ok=True)
-    connect(proxy=config.get('proxy'),effort='low' if config['effort']=='sol_low_luna_medium' else 'high')
+    configured_effort=config['effort']
+    connection_effort=('low' if configured_effort in ['sol_low_luna_medium','low'] else
+                       'medium' if configured_effort=='medium' else 'high')
+    connect(proxy=config.get('proxy'),effort=connection_effort)
     catalog=rpc('model/list', {'limit':100, 'includeHidden':True})
     for model in config['models']:
         row=next((x for x in catalog['data'] if x['model']==model), None)
-        effort=('low' if model.endswith('-sol') else 'medium') if config['effort']=='sol_low_luna_medium' else 'high'
+        effort=('low' if model.endswith('-sol') else 'medium') if configured_effort=='sol_low_luna_medium' else configured_effort
         if not row or effort not in [x['reasoningEffort'] for x in row['supportedReasoningEfforts']]:
             raise RuntimeError(f'{model} 未在当前模型目录中声明支持 {effort}，已暂停。')
         tiers=row.get('serviceTiers',[])
-        if config['service_tier']=='mixed' and tiers and not any(
+        if config['service_tier'] in ['mixed','fast'] and tiers and not any(
                 item.get('id') in ['fast','priority'] for item in tiers):
             raise RuntimeError(f'{model} 未在当前模型目录中声明支持 Fast，尚未开始测试。')
     file=DATA/'session.json'
@@ -742,7 +748,7 @@ def run(config_file, resume):
                 'no_ai_controller':True,'account_global_quota':True,'other_usage_must_be_paused':True,
                 'measurement_strategy':'complete_model_batch',
                 'quota_basis':'one start/end difference per model and service tier batch',
-                'execution_mode':'parallel_tasks_per_round','concurrency':len(config['tasks']),
+                'execution_mode':'parallel_tasks_per_round','concurrency':config.get('concurrency',len(config['tasks'])),
                 'round_barrier':True,'one_shared_quota_monitor':True,
                 'incomplete_model_batch_restarted':True,
                 'no_automatic_credit_purchase':True,'no_reset_card_consumption':True,
@@ -763,10 +769,14 @@ def run(config_file, resume):
         'network':copy.deepcopy(NETWORK)})
     write_json(file,session)
     half=config['repeats']//2
-    tiers=[('default',range(1,half+1)),('fast',range(half+1,config['repeats']+1))] \
-        if config['service_tier']=='mixed' else [('default',range(1,config['repeats']+1))]
+    if config['service_tier']=='mixed':
+        tiers=[('default',range(1,half+1)),('fast',range(half+1,config['repeats']+1))]
+    elif config['service_tier']=='fast':
+        tiers=[('fast',range(1,config['repeats']+1))]
+    else:
+        tiers=[('default',range(1,config['repeats']+1))]
     for model in config['models']:
-        effort=('low' if model.endswith('-sol') else 'medium') if config['effort']=='sol_low_luna_medium' else 'high'
+        effort=('low' if model.endswith('-sol') else 'medium') if configured_effort=='sol_low_luna_medium' else configured_effort
         for tier,rounds in tiers:
             if any(g.get('complete') and g.get('valid') and g['model']==model and
                    g.get('service_tier','default')==tier for g in session['groups']):
@@ -793,15 +803,23 @@ def run(config_file, resume):
                     if control() in ['pause','stop']:
                         raise RuntimeError('已暂停；当前速度模式批次未完成，继续时从头重跑该批次。')
                     tasks=[task for task in SUITE['tasks'] if task['id'] in config['tasks']]
-                    status('running',f'{model} · 第{repeat}轮 · {tier} · 准备{len(tasks)}项并行',completed=completed(),
-                        total=total,current_model=model,current_task=f'{tier} · 本轮{len(tasks)}项并行',repeat=repeat)
+                    round_concurrency=min(config.get('concurrency',len(tasks)),len(tasks))
+                    status('running',f'{model} · 第{repeat}轮 · {tier} · 准备{len(tasks)}项，最多{round_concurrency}项并行',completed=completed(),
+                        total=total,current_model=model,current_task=f'{tier} · 最多{round_concurrency}项并行',repeat=repeat)
                     round_start=now()
-                    records=execute_round(tasks,model,repeat,session,group_start,tier,effort)
+                    records=[]
+                    concurrency=round_concurrency
+                    for offset in range(0,len(tasks),concurrency):
+                        batch=tasks[offset:offset+concurrency]
+                        batch_records=execute_round(batch,model,repeat,session,group_start,tier,effort)
+                        records.extend(batch_records)
+                        if not all(record['valid'] for record in batch_records):
+                            break
                     for record in records:
                         record['batch_id']=group['batch_id'];group['attempt_ids'].append(record['attempt_id'])
                     group['rounds'].append({'repeat':repeat,'started_at':round_start,'ended_at':now(),
                         'attempt_ids':[record['attempt_id'] for record in records],
-                        'concurrent_tasks':len(tasks),'all_finished':all(record['status']=='completed' for record in records)})
+                        'concurrent_tasks':min(concurrency,len(tasks)),'all_finished':all(record['status']=='completed' for record in records)})
                     write_json(file,session)
                     if len(records)!=len(tasks) or not all(record['valid'] for record in records):
                         reason=next((record.get('round_error') for record in records
