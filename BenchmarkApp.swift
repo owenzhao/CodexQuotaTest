@@ -11,10 +11,15 @@ struct BenchmarkApp: App {
         .defaultSize(width: 1080, height: 800)
         .windowResizability(.contentMinSize)
         .commands { CommandGroup(replacing: .newItem) {} }
+        Window("Results Analysis", id: "analysis") {
+            ResultsAnalysisView()
+        }
+        .defaultSize(width: 1420, height: 920)
     }
 }
 
 struct ContentView: View {
+    @Environment(\.openWindow) private var openWindow
     @AppStorage("appLanguage") private var appLanguage = "en"
     var isChinese: Bool { appLanguage == "zh-Hans" }
     func text(_ english: String, _ chinese: String) -> String { isChinese ? chinese : english }
@@ -288,6 +293,7 @@ struct ContentView: View {
             }.padding(22)
             Divider()
             HStack(spacing: 10) {
+                Button(text("Analyze results", "分析结果")) { openWindow(id: "analysis") }
                 Button(text("Check environment", "检查环境"), action: checkEnvironment).disabled(isRunning)
                 Button(text("Start new test", "开始新测试"), action: beginRun).buttonStyle(.borderedProminent).disabled(!canStart)
                 if canResume {

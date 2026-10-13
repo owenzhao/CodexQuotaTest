@@ -7,7 +7,7 @@ import subprocess
 import time
 
 source=Path(__file__).resolve().parent
-version='1.3.13'
+version='1.3.14'
 target=source/'build'/f'CodexQuotaTest-{version}.app'
 app=source/'build'/'work'/'app-build'/target.name
 if app.exists():shutil.rmtree(app)
@@ -19,7 +19,7 @@ for name in ['runner.py','suite.json','defaults.json','AppIcon-v3.icns']:
     shutil.copy2(source/name,resources/name)
 info={'CFBundleName':'Codex Quota Test','CFBundleDisplayName':f'Codex Quota Test {version}',
     'CFBundleIdentifier':'com.parussoft.CodexQuotaTest','CFBundleExecutable':'CodexQuotaTest',
-    'CFBundlePackageType':'APPL','CFBundleShortVersionString':version,'CFBundleVersion':'21',
+    'CFBundlePackageType':'APPL','CFBundleShortVersionString':version,'CFBundleVersion':'22',
     'CFBundleIconFile':'AppIcon-v3.icns',
     'LSMinimumSystemVersion':'14.0','NSHighResolutionCapable':True,'NSPrincipalClass':'NSApplication'}
 (app/'Contents/Info.plist').write_bytes(plistlib.dumps(info))
@@ -27,8 +27,8 @@ cache=source/'build'/'work'/'swift-module-cache'
 cache.mkdir(parents=True,exist_ok=True)
 subprocess.run(['xcrun','swiftc','-swift-version','5','-parse-as-library','-O',
     '-module-cache-path',str(cache),
-    '-target','arm64-apple-macosx14.0','-framework','SwiftUI','-framework','AppKit',
-    str(source/'BenchmarkApp.swift'),'-o',str(mac/'CodexQuotaTest')],check=True)
+    '-target','arm64-apple-macosx14.0','-framework','SwiftUI','-framework','AppKit','-framework','Charts',
+    str(source/'BenchmarkApp.swift'),str(source/'ResultsAnalysisView.swift'),'-o',str(mac/'CodexQuotaTest')],check=True)
 subprocess.run(['codesign','--force','--sign','-',str(app)],check=True)
 if target.exists():
     backup=source/'build'/'work'/'app-backups'/(target.stem+'-'+str(time.time_ns())+'.app')
