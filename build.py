@@ -7,7 +7,7 @@ import subprocess
 import time
 
 source=Path(__file__).resolve().parent
-version='1.3.14'
+version='1.3.15'
 target=source/'build'/f'CodexQuotaTest-{version}.app'
 app=source/'build'/'work'/'app-build'/target.name
 if app.exists():shutil.rmtree(app)
